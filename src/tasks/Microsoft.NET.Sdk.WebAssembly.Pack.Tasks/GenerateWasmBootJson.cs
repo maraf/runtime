@@ -56,6 +56,8 @@ public class GenerateWasmBootJson : Task
 
     public ITaskItem[] ConfigurationFiles { get; set; }
 
+    public ITaskItem[] VfsFiles { get; set; }
+
     public ITaskItem[] EnvVariables { get; set; }
 
     public ITaskItem[] Extensions { get; set; }
@@ -418,6 +420,54 @@ public class GenerateWasmBootJson : Task
             }
         }
 
+        if (VfsFiles != null && IsTargeting110OrLater())
+        {
+            foreach (var vfsFile in VfsFiles)
+            {
+                string vfsUrl = Path.GetFileName(vfsFile.ItemSpec);
+                string? targetPath = item.GetMetadata("TargetPath");
+                string? loadingStage = item.GetMetadata("LoadingStage");
+                if (string.IsNullOrEmpty(targetPath))
+                {
+                    targetPath = Path.GetFileName(item.ItemSpec);
+                }
+
+                // We normalize paths from `\` to `/` as MSBuild items could use `\`.
+                targetPath = targetPath.Replace('\\', '/');
+                if (targetPathTable.ContainsKey(targetPath))
+                {
+                    string firstPath = Path.GetFullPath(targetPathTable[targetPath]!);
+                    string secondPath = Path.GetFullPath(item.ItemSpec);
+
+                    if (firstPath == secondPath)
+                    {
+                        Log.LogWarning(null, "WASM0003", "", "", 0, 0, 0, 0, $"Found identical vfs mappings for target path: {targetPath}, source file: {firstPath}. Ignoring.");
+                        continue;
+                    }
+
+                    throw new LogAsErrorException($"Found more than one file mapping to the target VFS path: {targetPath}. Source files: {firstPath}, and {secondPath}");
+                }
+
+                targetPathTable[targetPath] = item.ItemSpec;
+
+                var generatedFileName = $"{i++}_{Path.GetFileName(item.ItemSpec)}";
+                var vfsPath = Path.Combine(supportFilesDir, generatedFileName);
+                FileCopyChecked(item.ItemSpec, vfsPath, "FilesToIncludeInFileSystem");
+
+                var vfsDict = loadingStage switch
+                {
+                    null => vfs,
+                    "" => vfs,
+                    "Core" => coreVfs,
+                    _ => throw new LogAsErrorException($"The WasmFilesToIncludeInFileSystem '{item.ItemSpec}' has LoadingStage set to unsupported '{loadingStage}' (empty or 'Core' is currently supported).")
+                };
+                vfsDict[targetPath] = new()
+                {
+                    [$"supportFiles/{generatedFileName}"] = Utils.ComputeIntegrity(vfsPath)
+                };
+            }
+        }
+
 
         if (EnvVariables != null && EnvVariables.Length > 0)
         {
@@ -519,6 +569,7 @@ public class GenerateWasmBootJson : Task
     private static readonly Version version80 = new Version(8, 0);
     private static readonly Version version90 = new Version(9, 0);
     private static readonly Version version100 = new Version(10, 0);
+    private static readonly Version version110 = new Version(10, 0); // TODO: Update to 11.0 when we start targeting net11.0
 
     private bool IsTargeting80OrLater()
         => IsTargetingVersionOrLater(version80);
@@ -529,12 +580,15 @@ public class GenerateWasmBootJson : Task
     private bool IsTargeting100OrLater()
         => IsTargetingVersionOrLater(version100);
 
+    private bool IsTargeting110OrLater()
+        => IsTargetingVersionOrLater(version110);
+
     private bool IsTargetingVersionOrLater(Version version)
     {
         if (parsedTargetFrameworkVersion == null)
         {
             string tfv = TargetFrameworkVersion;
-            if (tfv.StartsWith("v"))
+            if (tfv.StartsWith('v'))
                 tfv = tfv.Substring(1);
 
             parsedTargetFrameworkVersion = Version.Parse(tfv);

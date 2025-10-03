@@ -1,3 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <Import Project="..\DefaultBrowserSample.targets" />
+
+  <ItemGroup>
+    <WasmFilesToIncludeInFileSystem Include="Greeting.txt" />
+  </ItemGroup>
 </Project>
