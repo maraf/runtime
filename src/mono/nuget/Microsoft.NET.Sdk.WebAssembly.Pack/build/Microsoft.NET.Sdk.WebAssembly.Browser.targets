@@ -78,6 +78,8 @@ Copyright (c) .NET Foundation. All rights reserved.
 
     <EnableDefaultWasmAssembliesToBundle>false</EnableDefaultWasmAssembliesToBundle>
     <WasmNestedPublishAppDependsOn>_GatherWasmFilesToPublish;$(WasmNestedPublishAppDependsOn)</WasmNestedPublishAppDependsOn>
+    <ProcessPublishFilesForWasmDependsOn>_ResolveWasmConfiguration;LoadStaticWebAssetsBuildManifest;_GatherWasmFilesToPublish</ProcessPublishFilesForWasmDependsOn>
+    <_GatherWasmFilesToPublishDependsOn />
     <_WasmNestedPublishAppPreTarget>ComputeFilesToPublish</_WasmNestedPublishAppPreTarget>
   </PropertyGroup>
 
@@ -985,7 +987,7 @@ Copyright (c) .NET Foundation. All rights reserved.
   </Target>
 
   <!-- Wasm's Nested publish is run just to build the native bits. We don't need to run blazor targets for that -->
-  <Target Name="ProcessPublishFilesForWasm" DependsOnTargets="_ResolveWasmConfiguration;LoadStaticWebAssetsBuildManifest;_GatherWasmFilesToPublish" AfterTargets="ILLink" Condition="'$(WasmBuildingForNestedPublish)' != 'true'">
+  <Target Name="ProcessPublishFilesForWasm" DependsOnTargets="$(ProcessPublishFilesForWasmDependsOn)" AfterTargets="ILLink" Condition="'$(WasmBuildingForNestedPublish)' != 'true'">
     <!-- The list of static web assets already contains all the assets from the build. We want to correct certain assets that might
          have changed as part of the publish process. We are going to do so as follows:
          * We will update Blazor runtime asset dlls if we are running PublishTrimmed
@@ -1353,7 +1355,7 @@ Copyright (c) .NET Foundation. All rights reserved.
   </Target>
 
   <!-- called twice, once in the regular publish, and the other in the nested publish -->
-  <Target Name="_GatherWasmFilesToPublish">
+  <Target Name="_GatherWasmFilesToPublish" DependsOnTargets="$(_GatherWasmFilesToPublishDependsOn)">
     <ItemGroup>
       <WasmAssembliesToBundle Remove="@(WasmAssembliesToBundle)" />
       <WasmAssembliesToBundle Include="@(ResolvedFileToPublish)" Exclude="@(_Exclude)" Condition="%(Extension) == '.dll'" />

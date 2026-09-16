@@ -27,6 +27,10 @@ Copyright (c) .NET Foundation. All rights reserved.
     <PublishReadyToRunCrossgen2ExtraArgs>$(PublishReadyToRunCrossgen2ExtraArgs);--opt-cross-module:*</PublishReadyToRunCrossgen2ExtraArgs>
     <!-- NYI/SIMD methods crossgen2 can't emit into R2R fall back to the runtime JIT. -->
     <PublishReadyToRunCrossgen2ExtraArgs>$(PublishReadyToRunCrossgen2ExtraArgs);--codegenopt:JitWasmNyiToR2RUnsupported=1;--codegenopt:JitWasmSimdNyiToR2RUnsupported=1</PublishReadyToRunCrossgen2ExtraArgs>
+    <!-- _GatherWasmFilesToPublish collects the assemblies to bundle, so the R2R images must exist by then.
+         Overrides the empty default from Microsoft.NET.Sdk.WebAssembly.Browser.targets, which imports this
+         file after declaring it. -->
+    <_GatherWasmFilesToPublishDependsOn>CreateReadyToRunImages</_GatherWasmFilesToPublishDependsOn>
   </PropertyGroup>
 
   <!-- Prebuilt R2R probe directory for ConvertDllsToWebcil. PublishTrimmed is deliberately not consulted:
@@ -84,52 +88,6 @@ Copyright (c) .NET Foundation. All rights reserved.
     </ItemGroup>
   </Target>
 
-  <!-- In any trimmed publish flow the served bundle must contain ONLY the linker's trimmed closure, sourced
-       from the trimmed output. Mixing it with the runtime pack's full copy-local set is wrong with or without
-       ReadyToRun: it mixes version bubbles (runtime MVID fault at startup) and lets an untrimmed assembly call
-       a member ILLink removed from the trimmed framework (MissingMethodException).
-       Outer build only - the nested publish worker owns the trimming, and rewriting its ReferenceCopyLocalPaths
-       ahead of ILLink would corrupt the link. No-op when the linker has not run. -->
-  <Target Name="_WasmCoreClrRestrictBuildToTrimmedClosure"
-          Condition="'$(_WasmEnableWebcil)' == 'true' and '$(PublishTrimmed)' == 'true'"
-          DependsOnTargets="_WasmCoreClrSelectR2RDirectories"
-          BeforeTargets="_ComputeWasmBuildCandidates">
-    <PropertyGroup>
-      <_WasmTrimmedClosureDir Condition="'$(_WasmTrimmedClosureDir)' == '' and '$(IntermediateLinkDir)' != ''">$(IntermediateLinkDir)</_WasmTrimmedClosureDir>
-      <_WasmTrimmedClosureDir Condition="'$(_WasmTrimmedClosureDir)' == ''">$([MSBuild]::NormalizeDirectory('$(IntermediateOutputPath)', 'linked'))</_WasmTrimmedClosureDir>
-      <!-- A native relink (or AOT) returns the final, already trimmed assembly set from the nested publish,
-           project assembly included. Only the plain managed path leaves it empty and falls back to the
-           untrimmed IntermediateAssembly, so only that path needs the repoint below. -->
-      <_WasmCoreClrHasFinalAssemblies Condition="'@(WasmAssembliesFinal)' != ''">true</_WasmCoreClrHasFinalAssemblies>
-    </PropertyGroup>
-    <ItemGroup Condition="'$(_WasmCoreClrUnderPublish)' == 'true' and '$(WasmBuildingForNestedPublish)' != 'true' and Exists('$(_WasmTrimmedClosureDir)')">
-      <!-- Tag every copy-local item with trimmed-closure membership (default false so the metadata is always
-           defined), then set true for managed assemblies the linker kept. -->
-      <ReferenceCopyLocalPaths Update="@(ReferenceCopyLocalPaths)">
-        <_WasmInTrimmedClosure>false</_WasmInTrimmedClosure>
-      </ReferenceCopyLocalPaths>
-      <ReferenceCopyLocalPaths Update="@(ReferenceCopyLocalPaths)"
-                               Condition="'%(Extension)' == '.dll' and Exists('$(_WasmTrimmedClosureDir)%(FileName).dll')">
-        <_WasmInTrimmedClosure>true</_WasmInTrimmedClosure>
-      </ReferenceCopyLocalPaths>
-      <!-- Drop assemblies the linker trimmed out of the app closure. -->
-      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
-        Condition="'%(Extension)' == '.dll' and '%(_WasmInTrimmedClosure)' != 'true'" />
-      <!-- Repoint the kept closure assemblies at their trimmed IL so IL-only members share the trimmed MVIDs
-           the per-app R2R members were compiled against (the R2R members are still staged from obj/R2R). -->
-      <_WasmTrimmedClosureRedirect Include="@(ReferenceCopyLocalPaths)" Condition="'%(_WasmInTrimmedClosure)' == 'true'" />
-      <ReferenceCopyLocalPaths Remove="@(_WasmTrimmedClosureRedirect)" />
-      <ReferenceCopyLocalPaths Include="@(_WasmTrimmedClosureRedirect->'$(_WasmTrimmedClosureDir)%(FileName).dll')"
-                               RelativePath="%(FileName)%(Extension)" />
-      <!-- The project's own assembly does not travel through ReferenceCopyLocalPaths: _ComputeWasmBuildCandidates
-           serves it from @(IntermediateAssembly), i.e. the UNTRIMMED compile output, which then mismatches the
-           trimmed framework at run time. @(WasmAssembliesFinal) is the SDK's designed override. Skip it when a
-           nested publish already supplied that set, or ComputeWasmBuildAssets sees two project assemblies. -->
-      <WasmAssembliesFinal Include="@(IntermediateAssembly->'$(_WasmTrimmedClosureDir)%(FileName).dll')"
-                           Condition="'$(_WasmCoreClrHasFinalAssemblies)' != 'true' and Exists('$(_WasmTrimmedClosureDir)%(IntermediateAssembly.FileName).dll')" />
-    </ItemGroup>
-  </Target>
-
   <!-- Same prune for publish, before ProcessPublishFilesForWasm derives _WasmResolvedFilesToPublish. -->
   <Target Name="_WasmCoreClrPruneR2RFromPublish"
           Condition="'$(_WasmEnableWebcil)' == 'true'"
@@ -138,54 +96,6 @@ Copyright (c) .NET Foundation. All rights reserved.
     <ItemGroup>
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
         Condition="'%(Extension)' == '.wasm' and '$(_WasmRuntimePackR2RDir)' != '' and Exists('$(_WasmRuntimePackR2RDir)%(FileName).wasm')" />
-    </ItemGroup>
-  </Target>
-
-  <!-- Route per-app R2R images into the served _framework. The SDK CrossGen pipeline replaces each IL .dll in
-       ResolvedFileToPublish with its R2R image named <name>.wasm, but ComputeWasmPublishAssets keys on the .dll
-       extension to classify managed assemblies, so a .wasm-named image is treated as native and leaks to the
-       publish root. Restoring the IL .dll (via _ReadyToRunCompileList) makes it managed again and
-       ConvertDllsToWebcil stages the R2R image from PrebuiltR2RDirectory - the dev-loop mechanism.
-       Two BeforeTargets, because two different targets consume the list: ProcessPublishFilesForWasm for a plain
-       publish, and _GatherWasmFilesToPublish when a native relink is in play. The relink crossgens inside
-       WasmNestedPublishApp, where ProcessPublishFilesForWasm is never scheduled; without the second hook every
-       crossgen'd assembly is still named .wasm when _GatherWasmFilesToPublish filters to .dll and silently drops
-       out of the bundle - a publish that exits 0 with no System.Private.CoreLib. -->
-  <Target Name="_WasmCoreClrRoutePerAppR2RToFramework"
-          Condition="'$(_WasmEnableWebcil)' == 'true' and '$(PublishReadyToRun)' == 'true'"
-          DependsOnTargets="_WasmCoreClrSelectR2RDirectories;CreateReadyToRunImages"
-          BeforeTargets="ProcessPublishFilesForWasm;_GatherWasmFilesToPublish">
-    <ItemGroup>
-      <ResolvedFileToPublish Remove="@(_ReadyToRunCompileList->'%(OutputR2RImage)')" />
-      <ResolvedFileToPublish Include="@(_ReadyToRunCompileList)"
-                             RelativePath="%(FileName)%(Extension)"
-                             CopyToPublishDirectory="PreserveNewest" />
-    </ItemGroup>
-  </Target>
-
-  <!-- Feed the trimmed IL closure into mainline R2R as the compile+reference set (see dotnet/runtime#121257).
-       On the Blazor/SWA route ILLink stamps PostprocessAssembly=true on its own collection, not on
-       ResolvedFileToPublish, so the mainline compile list is empty and crossgen2 never runs. -->
-  <Target Name="_WasmFeedReadyToRunCompileList"
-          Condition="'$(PublishReadyToRun)' == 'true' and '$(PublishTrimmed)' == 'true' and '$(PublishReadyToRunComposite)' != 'true' and '$(IntermediateLinkDir)' != ''"
-          BeforeTargets="_PrepareForReadyToRunCompilation">
-    <ItemGroup>
-      <!-- Clear the stale base-SDK R2R mark on the untrimmed runtime-pack copy (e.g. CoreLib under native/)
-           so crossgen resolves against the trimmed IL supplied below; it stays for webcil output. -->
-      <ResolvedFileToPublish Update="@(ResolvedFileToPublish)" PostprocessAssembly="false"
-        Condition="'%(ResolvedFileToPublish.PostprocessAssembly)' == 'true' and Exists('$(IntermediateLinkDir)%(ResolvedFileToPublish.FileName).dll')" />
-    </ItemGroup>
-    <ItemGroup>
-      <!-- Source the compile+publish set from the on-disk linker output, not @(ManagedAssemblyToLink):
-           on an incremental publish where ILLink is up-to-date and its prep target is skipped, that item
-           is not populated, so the trimmed framework assemblies drop out of ResolvedFileToPublish and are
-           omitted from the served bundle (empty coreAssembly, non-bootable). The linked dir holds exactly
-           the trimmed closure, so this is equivalent on a full build and correct on an incremental one. -->
-      <_WasmReadyToRunCompileInput Include="$(IntermediateLinkDir)*.dll" />
-      <ResolvedFileToPublish Include="@(_WasmReadyToRunCompileInput)"
-                             PostprocessAssembly="true"
-                             RelativePath="%(FileName)%(Extension)"
-                             CopyToPublishDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
 
@@ -205,7 +115,7 @@ Copyright (c) .NET Foundation. All rights reserved.
           Condition="'$(PublishReadyToRun)' == 'true' and '$(PublishReadyToRunComposite)' != 'true'"
           BeforeTargets="_CreateR2RImages">
     <ItemGroup>
-      <_ReadyToRunCompilerInputs Include="@(_ReadyToRunCompileList);@(_ReadyToRunAssembliesToReference)" />
+      <_ReadyToRunCompilerInputs Include="@(_ReadyToRunCompileList)" />
       <!-- crossgen2 itself, not just the JIT: an updated compiler with an unchanged JIT must still invalidate. -->
       <_ReadyToRunCompilerInputs Include="$(_WasmResolvedCrossgen2Dir)crossgen2*;$(_WasmResolvedCrossgen2Dir)clrjit_universal_wasm_*"
                                  Condition="'$(_WasmResolvedCrossgen2Dir)' != ''" />
